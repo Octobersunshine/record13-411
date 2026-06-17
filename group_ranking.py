@@ -12,9 +12,16 @@ class GroupRankingService:
         - 'max': 并列取最大排名（跳跃式）
         - 'dense': 并列取相同排名，后续排名不间断
         - 'first': 按出现顺序排名，无并列
+
+    空值（NaN）处理方式:
+        - 'bottom': 空值统一排最后（默认，推荐）
+        - 'top': 空值统一排最前
+        - 'keep': 空值排名保持为 NaN（不推荐，会导致排序异常）
     """
 
     VALID_METHODS = {'average', 'min', 'max', 'dense', 'first'}
+    VALID_NA_OPTIONS = {'keep', 'top', 'bottom'}
+    DEFAULT_NA_OPTION = 'bottom'
 
     def __init__(self):
         pass
@@ -27,7 +34,7 @@ class GroupRankingService:
         rank_col: Optional[str] = None,
         method: str = 'average',
         ascending: bool = True,
-        na_option: str = 'keep',
+        na_option: Optional[str] = None,
         pct: bool = False,
     ) -> pd.DataFrame:
         """
@@ -40,7 +47,7 @@ class GroupRankingService:
             rank_col: 输出的排名字段名，默认在 value_col 后加 '_rank'
             method: 并列处理方式，可选 'average'/'min'/'max'/'dense'/'first'
             ascending: True 为升序（值越小排名越靠前），False 为降序
-            na_option: NaN 的处理方式，'keep'/'top'/'bottom'
+            na_option: NaN 的处理方式，'bottom'（默认，排最后）/'top'（排最前）/'keep'（保持NaN）
             pct: 是否以百分比形式显示排名
 
         Returns:
@@ -49,6 +56,14 @@ class GroupRankingService:
         if method not in self.VALID_METHODS:
             raise ValueError(
                 f"method 必须是 {self.VALID_METHODS} 之一，当前传入: {method}"
+            )
+
+        if na_option is None:
+            na_option = self.DEFAULT_NA_OPTION
+
+        if na_option not in self.VALID_NA_OPTIONS:
+            raise ValueError(
+                f"na_option 必须是 {self.VALID_NA_OPTIONS} 之一，当前传入: {na_option}"
             )
 
         if value_col not in df.columns:
@@ -112,7 +127,7 @@ class GroupRankingService:
                 rank_col=config.get('rank_col'),
                 method=config.get('method', 'average'),
                 ascending=config.get('ascending', True),
-                na_option=config.get('na_option', 'keep'),
+                na_option=config.get('na_option', self.DEFAULT_NA_OPTION),
                 pct=config.get('pct', False),
             )
         return result
@@ -123,6 +138,7 @@ class GroupRankingService:
         group_cols: Union[str, List[str]],
         rank_col: str,
         top_n: Optional[int] = None,
+        na_position: str = 'last',
     ) -> pd.DataFrame:
         """
         按分组获取排名摘要，可选取每个分组的前 N 名。
@@ -132,6 +148,7 @@ class GroupRankingService:
             group_cols: 分组列名或列名列表
             rank_col: 排名字段名
             top_n: 每个分组取前 N 名，None 取全部
+            na_position: 空值排名的位置，'last'（默认，排最后）/'first'（排最前）
 
         Returns:
             排序后的摘要 DataFrame
@@ -139,12 +156,32 @@ class GroupRankingService:
         if isinstance(group_cols, str):
             group_cols = [group_cols]
 
-        result = df.sort_values(group_cols + [rank_col]).reset_index(drop=True)
+        if na_position not in {'first', 'last'}:
+            raise ValueError(
+                f"na_position 必须是 'first' 或 'last'，当前传入: {na_position}"
+            )
+
+        result = df.sort_values(
+            group_cols + [rank_col],
+            na_position=na_position,
+        ).reset_index(drop=True)
 
         if top_n is not None:
+            def _get_top_n(group):
+                has_na = group[rank_col].isna().any()
+                if has_na and na_position == 'last':
+                    valid_rows = group[group[rank_col].notna()]
+                    na_rows = group[group[rank_col].isna()]
+                    return pd.concat([
+                        valid_rows.nsmallest(top_n, rank_col),
+                        na_rows,
+                    ])
+                else:
+                    return group.nsmallest(top_n, rank_col)
+
             result = (
                 result.groupby(group_cols, group_keys=False)
-                .apply(lambda x: x.nsmallest(top_n, rank_col))
+                .apply(_get_top_n)
                 .reset_index(drop=True)
             )
 
